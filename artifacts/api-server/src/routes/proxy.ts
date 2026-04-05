@@ -18,6 +18,30 @@ const anthropicClient = new Anthropic({
 const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini", "o3"];
 const ANTHROPIC_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
 
+/**
+ * Run an async operation while keeping the HTTP connection alive by writing
+ * a space character every 10 s. This prevents platform-level proxy timeouts
+ * (e.g. Replit's 5-minute idle timeout) for non-streaming JSON responses.
+ * Leading whitespace is ignored by all JSON parsers, so clients are unaffected.
+ */
+async function withJsonKeepalive<T>(
+  req: Request,
+  res: Response,
+  op: () => Promise<T>,
+): Promise<T> {
+  res.setHeader("Content-Type", "application/json");
+  res.flushHeaders();
+  const keepalive = setInterval(() => {
+    if (!res.writableEnded) res.write(" ");
+  }, 10_000);
+  req.on("close", () => clearInterval(keepalive));
+  try {
+    return await op();
+  } finally {
+    clearInterval(keepalive);
+  }
+}
+
 function verifyToken(req: Request, res: Response): boolean {
   const proxyKey = process.env.PROXY_API_KEY;
   if (!proxyKey) {
@@ -426,14 +450,15 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
           if (!res.writableEnded) res.end();
         }
       } else {
-        // Non-streaming: use stream().finalMessage() to avoid long timeout
-        const anthropicStream = anthropicClient.messages.stream(
-          createParams as Anthropic.MessageStreamParams,
-          sdkOptsCC,
+        // Non-streaming: use stream().finalMessage() + keepalive to survive long requests
+        const finalMsg = await withJsonKeepalive(req, res, () =>
+          anthropicClient.messages.stream(
+            createParams as Anthropic.MessageStreamParams,
+            sdkOptsCC,
+          ).finalMessage()
         );
-        const finalMsg = await anthropicStream.finalMessage();
         const openaiResponse = anthropicToOpenAI(finalMsg);
-        res.json(openaiResponse);
+        if (!res.writableEnded) res.end(JSON.stringify(openaiResponse));
       }
       return;
     }
@@ -559,12 +584,13 @@ router.post("/messages", async (req: Request, res: Response) => {
           if (!res.writableEnded) res.end();
         }
       } else {
-        const anthropicStream = anthropicClient.messages.stream(
-          createParams as Anthropic.MessageStreamParams,
-          sdkOptions,
+        const finalMsg = await withJsonKeepalive(req, res, () =>
+          anthropicClient.messages.stream(
+            createParams as Anthropic.MessageStreamParams,
+            sdkOptions,
+          ).finalMessage()
         );
-        const finalMsg = await anthropicStream.finalMessage();
-        res.json(finalMsg);
+        if (!res.writableEnded) res.end(JSON.stringify(finalMsg));
       }
       return;
     }
@@ -776,14 +802,16 @@ router.post("/messages", async (req: Request, res: Response) => {
         }
       } else {
         // Non-streaming: call OpenAI and convert to Anthropic Message format
-        const oaiResult = await openaiClient.chat.completions.create({
-          model,
-          messages: openaiMessages,
-          stream: false,
-          ...(openaiTools ? { tools: openaiTools } : {}),
-          ...(openaiToolChoice ? { tool_choice: openaiToolChoice } : {}),
-          ...(max_tokens ? { max_completion_tokens: max_tokens } : {}),
-        });
+        const oaiResult = await withJsonKeepalive(req, res, () =>
+          openaiClient.chat.completions.create({
+            model,
+            messages: openaiMessages,
+            stream: false,
+            ...(openaiTools ? { tools: openaiTools } : {}),
+            ...(openaiToolChoice ? { tool_choice: openaiToolChoice } : {}),
+            ...(max_tokens ? { max_completion_tokens: max_tokens } : {}),
+          }) as Promise<OpenAI.Chat.ChatCompletion>
+        );
 
         const choice = oaiResult.choices[0];
         const content: Anthropic.ContentBlock[] = [];
@@ -818,7 +846,7 @@ router.post("/messages", async (req: Request, res: Response) => {
           },
         };
 
-        res.json(anthropicResponse);
+        if (!res.writableEnded) res.end(JSON.stringify(anthropicResponse));
       }
       return;
     }
