@@ -431,12 +431,30 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
     logger.error({ err }, "Proxy error in /v1/chat/completions");
     if (!res.headersSent) {
       res.status(500).json({ error: { message: "Internal proxy error", type: "server_error" } });
-    } else {
+    } else if (!res.writableEnded) {
       res.write(`data: ${JSON.stringify({ error: { message: "Stream error", type: "server_error" } })}\n\n`);
       res.end();
     }
   }
 });
+
+// Normalize system: accept string or array of text blocks
+function normalizeSystem(
+  system: unknown
+): Anthropic.MessageCreateParams["system"] | undefined {
+  if (!system) return undefined;
+  if (typeof system === "string") return system;
+  if (Array.isArray(system)) {
+    // Flatten array of text blocks into a single string for simplicity,
+    // or pass as-is if the SDK supports typed array (it does as of recent versions)
+    const blocks = system as Array<{ type: string; text?: string }>;
+    return blocks
+      .filter((b) => b.type === "text" && b.text)
+      .map((b) => b.text!)
+      .join("\n\n");
+  }
+  return undefined;
+}
 
 // ─── POST /v1/messages (Anthropic native) ──────────────────────────────────────
 
@@ -446,15 +464,18 @@ router.post("/messages", async (req: Request, res: Response) => {
   const body = req.body as {
     model: string;
     messages: Anthropic.MessageParam[];
-    system?: string;
+    system?: unknown;
     tools?: Anthropic.Tool[];
     tool_choice?: Anthropic.MessageCreateParams["tool_choice"];
     max_tokens?: number;
     stream?: boolean;
+    metadata?: Anthropic.MessageCreateParams["metadata"];
+    temperature?: number;
     [key: string]: unknown;
   };
 
-  const { model, messages, system, tools, tool_choice, max_tokens, stream, ...rest } = body;
+  const { model, messages, tools, tool_choice, max_tokens, stream, metadata, temperature } = body;
+  const system = normalizeSystem(body.system);
 
   if (!model) {
     res.status(400).json({ error: { message: "model is required" } });
@@ -464,14 +485,16 @@ router.post("/messages", async (req: Request, res: Response) => {
   try {
     // ── Claude native passthrough ──
     if (isAnthropicModel(model)) {
+      // Only pass known-valid Anthropic fields to avoid 400s from unknown keys
       const createParams: Anthropic.MessageCreateParams = {
         model,
         messages,
         max_tokens: max_tokens ?? 8192,
         ...(system ? { system } : {}),
-        ...(tools ? { tools } : {}),
+        ...(tools && tools.length > 0 ? { tools } : {}),
         ...(tool_choice ? { tool_choice } : {}),
-        ...rest,
+        ...(metadata ? { metadata } : {}),
+        ...(temperature !== undefined ? { temperature } : {}),
       };
 
       if (stream) {
@@ -482,8 +505,10 @@ router.post("/messages", async (req: Request, res: Response) => {
         res.flushHeaders();
 
         const keepalive = setInterval(() => {
-          res.write(": keepalive\n\n");
-          res.flush?.();
+          if (!res.writableEnded) {
+            res.write(": keepalive\n\n");
+            res.flush?.();
+          }
         }, 5000);
 
         req.on("close", () => clearInterval(keepalive));
@@ -491,12 +516,13 @@ router.post("/messages", async (req: Request, res: Response) => {
         try {
           const anthropicStream = anthropicClient.messages.stream(createParams as Anthropic.MessageStreamParams);
           for await (const event of anthropicStream) {
+            if (res.writableEnded) break;
             res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
             res.flush?.();
           }
         } finally {
           clearInterval(keepalive);
-          res.end();
+          if (!res.writableEnded) res.end();
         }
       } else {
         const anthropicStream = anthropicClient.messages.stream(createParams as Anthropic.MessageStreamParams);
@@ -512,7 +538,7 @@ router.post("/messages", async (req: Request, res: Response) => {
       const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
       if (system) {
-        openaiMessages.push({ role: "system", content: system });
+        openaiMessages.push({ role: "system", content: typeof system === "string" ? system : String(system) });
       }
 
       for (const msg of messages) {
@@ -599,8 +625,10 @@ router.post("/messages", async (req: Request, res: Response) => {
         res.flushHeaders();
 
         const keepalive = setInterval(() => {
-          res.write(": keepalive\n\n");
-          res.flush?.();
+          if (!res.writableEnded) {
+            res.write(": keepalive\n\n");
+            res.flush?.();
+          }
         }, 5000);
 
         req.on("close", () => clearInterval(keepalive));
@@ -707,7 +735,7 @@ router.post("/messages", async (req: Request, res: Response) => {
           res.flush?.();
         } finally {
           clearInterval(keepalive);
-          res.end();
+          if (!res.writableEnded) res.end();
         }
       } else {
         // Non-streaming: call OpenAI and convert to Anthropic Message format
@@ -763,7 +791,7 @@ router.post("/messages", async (req: Request, res: Response) => {
     logger.error({ err }, "Proxy error in /v1/messages");
     if (!res.headersSent) {
       res.status(500).json({ error: { message: "Internal proxy error" } });
-    } else {
+    } else if (!res.writableEnded) {
       res.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { message: "Stream error" } })}\n\n`);
       res.end();
     }
