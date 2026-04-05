@@ -25,20 +25,12 @@ function verifyToken(req: Request, res: Response): boolean {
     return false;
   }
 
-  // Accept both Authorization: Bearer <key> (OpenAI SDK style)
-  // and X-Api-Key: <key> (Anthropic SDK / Claude Code CLI style)
-  let token: string | undefined;
   const auth = req.headers.authorization;
-  if (auth && auth.startsWith("Bearer ")) {
-    token = auth.slice(7);
-  } else if (req.headers["x-api-key"]) {
-    token = req.headers["x-api-key"] as string;
-  }
-
-  if (!token) {
-    res.status(401).json({ error: { message: "Missing API key (use Authorization: Bearer or X-Api-Key)", type: "invalid_request_error" } });
+  if (!auth || !auth.startsWith("Bearer ")) {
+    res.status(401).json({ error: { message: "Missing Authorization header", type: "invalid_request_error" } });
     return false;
   }
+  const token = auth.slice(7);
   if (token !== proxyKey) {
     res.status(401).json({ error: { message: "Invalid API key", type: "invalid_request_error" } });
     return false;
