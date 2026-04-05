@@ -24,12 +24,21 @@ function verifyToken(req: Request, res: Response): boolean {
     res.status(500).json({ error: { message: "PROXY_API_KEY not configured", type: "server_error" } });
     return false;
   }
+
+  // Accept both Authorization: Bearer <key> (OpenAI SDK style)
+  // and X-Api-Key: <key> (Anthropic SDK / Claude Code CLI style)
+  let token: string | undefined;
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith("Bearer ")) {
-    res.status(401).json({ error: { message: "Missing Authorization header", type: "invalid_request_error" } });
+  if (auth && auth.startsWith("Bearer ")) {
+    token = auth.slice(7);
+  } else if (req.headers["x-api-key"]) {
+    token = req.headers["x-api-key"] as string;
+  }
+
+  if (!token) {
+    res.status(401).json({ error: { message: "Missing API key (use Authorization: Bearer or X-Api-Key)", type: "invalid_request_error" } });
     return false;
   }
-  const token = auth.slice(7);
   if (token !== proxyKey) {
     res.status(401).json({ error: { message: "Invalid API key", type: "invalid_request_error" } });
     return false;
@@ -293,6 +302,12 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         ...(anthropicToolChoice ? { tool_choice: anthropicToolChoice } : {}),
       };
 
+      // Forward anthropic-beta from client to upstream
+      const anthropicBetaCC = req.headers["anthropic-beta"] as string | undefined;
+      const sdkOptsCC = anthropicBetaCC
+        ? { headers: { "anthropic-beta": anthropicBetaCC } }
+        : {};
+
       if (stream) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
@@ -301,8 +316,10 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         res.flushHeaders();
 
         const keepalive = setInterval(() => {
-          res.write(": keepalive\n\n");
-          res.flush?.();
+          if (!res.writableEnded) {
+            res.write(": keepalive\n\n");
+            res.flush?.();
+          }
         }, 5000);
 
         req.on("close", () => clearInterval(keepalive));
@@ -310,7 +327,7 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         try {
           // Stream Anthropic and convert to OpenAI chunk format
           const streamParams = { ...createParams, stream: true } as Anthropic.MessageStreamParams;
-          const anthropicStream = anthropicClient.messages.stream(streamParams);
+          const anthropicStream = anthropicClient.messages.stream(streamParams, sdkOptsCC);
 
           let messageId = `chatcmpl-${Date.now()}`;
           let currentToolCallIndex = 0;
@@ -414,11 +431,14 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
           res.write("data: [DONE]\n\n");
         } finally {
           clearInterval(keepalive);
-          res.end();
+          if (!res.writableEnded) res.end();
         }
       } else {
         // Non-streaming: use stream().finalMessage() to avoid long timeout
-        const anthropicStream = anthropicClient.messages.stream(createParams as Anthropic.MessageStreamParams);
+        const anthropicStream = anthropicClient.messages.stream(
+          createParams as Anthropic.MessageStreamParams,
+          sdkOptsCC,
+        );
         const finalMsg = await anthropicStream.finalMessage();
         const openaiResponse = anthropicToOpenAI(finalMsg);
         res.json(openaiResponse);
