@@ -251,7 +251,7 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
   try {
     // ── OpenAI routing ──
     if (isOpenAIModel(model)) {
-      if (stream) {
+      if (stream !== false) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
@@ -324,7 +324,7 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         ? { headers: { "anthropic-beta": anthropicBetaCC } }
         : {};
 
-      if (stream) {
+      if (stream !== false) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
@@ -553,7 +553,7 @@ router.post("/messages", async (req: Request, res: Response) => {
         ? { headers: { "anthropic-beta": anthropicBeta } }
         : {};
 
-      if (stream) {
+      if (stream !== false) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
@@ -680,7 +680,7 @@ router.post("/messages", async (req: Request, res: Response) => {
         }
       }
 
-      if (stream) {
+      if (stream !== false) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
