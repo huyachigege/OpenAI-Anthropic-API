@@ -471,11 +471,21 @@ router.post("/messages", async (req: Request, res: Response) => {
     stream?: boolean;
     metadata?: Anthropic.MessageCreateParams["metadata"];
     temperature?: number;
+    thinking?: { type: "enabled"; budget_tokens: number };
+    top_k?: number;
+    top_p?: number;
+    stop_sequences?: string[];
     [key: string]: unknown;
   };
 
-  const { model, messages, tools, tool_choice, max_tokens, stream, metadata, temperature } = body;
+  const {
+    model, messages, tools, tool_choice, max_tokens, stream,
+    metadata, temperature, thinking, top_k, top_p, stop_sequences,
+  } = body;
   const system = normalizeSystem(body.system);
+
+  // Forward anthropic-beta header from client to upstream Anthropic
+  const anthropicBeta = req.headers["anthropic-beta"] as string | undefined;
 
   if (!model) {
     res.status(400).json({ error: { message: "model is required" } });
@@ -495,7 +505,16 @@ router.post("/messages", async (req: Request, res: Response) => {
         ...(tool_choice ? { tool_choice } : {}),
         ...(metadata ? { metadata } : {}),
         ...(temperature !== undefined ? { temperature } : {}),
+        ...(thinking ? { thinking } : {}),
+        ...(top_k !== undefined ? { top_k } : {}),
+        ...(top_p !== undefined ? { top_p } : {}),
+        ...(stop_sequences ? { stop_sequences } : {}),
       };
+
+      // Extra SDK request options — forward anthropic-beta if present
+      const sdkOptions = anthropicBeta
+        ? { headers: { "anthropic-beta": anthropicBeta } }
+        : {};
 
       if (stream) {
         res.setHeader("Content-Type", "text/event-stream");
@@ -514,7 +533,10 @@ router.post("/messages", async (req: Request, res: Response) => {
         req.on("close", () => clearInterval(keepalive));
 
         try {
-          const anthropicStream = anthropicClient.messages.stream(createParams as Anthropic.MessageStreamParams);
+          const anthropicStream = anthropicClient.messages.stream(
+            createParams as Anthropic.MessageStreamParams,
+            sdkOptions,
+          );
           for await (const event of anthropicStream) {
             if (res.writableEnded) break;
             res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
@@ -525,7 +547,10 @@ router.post("/messages", async (req: Request, res: Response) => {
           if (!res.writableEnded) res.end();
         }
       } else {
-        const anthropicStream = anthropicClient.messages.stream(createParams as Anthropic.MessageStreamParams);
+        const anthropicStream = anthropicClient.messages.stream(
+          createParams as Anthropic.MessageStreamParams,
+          sdkOptions,
+        );
         const finalMsg = await anthropicStream.finalMessage();
         res.json(finalMsg);
       }
