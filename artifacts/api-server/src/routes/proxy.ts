@@ -381,6 +381,7 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
           const toolCallAccumulator: Map<number, { id: string; name: string; args: string }> = new Map();
 
           for await (const event of anthropicStream) {
+            if (res.writableEnded) break;
             if (event.type === "message_start") {
               messageId = event.message.id;
               // Send initial chunk
@@ -490,10 +491,20 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
               };
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
               res.flush?.();
+            } else if (event.type === "message_stop") {
+              // Emit [DONE] and immediately end the client response.
+              // The upstream SSE connection may not close naturally through the
+              // Replit proxy; we must not wait for it before ending the response.
+              if (!res.writableEnded) {
+                res.write("data: [DONE]\n\n");
+                clearInterval(keepalive);
+                res.end();
+              }
             }
           }
 
-          res.write("data: [DONE]\n\n");
+          // Fallback [DONE] in case message_stop was not received in the stream.
+          if (!res.writableEnded) res.write("data: [DONE]\n\n");
         } finally {
           clearInterval(keepalive);
           if (!res.writableEnded) res.end();
@@ -639,6 +650,17 @@ router.post("/messages", async (req: Request, res: Response) => {
             if (res.writableEnded) break;
             res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
             res.flush?.();
+            // After forwarding message_stop, immediately end the client response.
+            // The upstream SSE connection may remain open on the Replit proxy after
+            // message_stop (especially for tool_use responses), causing the for-await
+            // loop to block indefinitely. Ending here unblocks the client immediately.
+            if (event.type === "message_stop" && !res.writableEnded) {
+              clearInterval(keepalive);
+              res.end();
+              // Do NOT break here — that would trigger abort() on the upstream HTTP
+              // controller which caused 5-min timeout issues. The writableEnded guard
+              // above will break on the next iteration when the upstream sends anything.
+            }
           }
         } finally {
           clearInterval(keepalive);
