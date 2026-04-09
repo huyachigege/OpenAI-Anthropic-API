@@ -49,12 +49,23 @@ function verifyToken(req: Request, res: Response): boolean {
     return false;
   }
 
+  // Accept both OpenAI-style (Authorization: Bearer <key>)
+  // and Anthropic-style (x-api-key: <key>) authentication
+  let token: string | undefined;
   const auth = req.headers.authorization;
-  if (!auth || !auth.startsWith("Bearer ")) {
-    res.status(401).json({ error: { message: "Missing Authorization header", type: "invalid_request_error" } });
+  if (auth && auth.startsWith("Bearer ")) {
+    token = auth.slice(7);
+  } else {
+    const xApiKey = req.headers["x-api-key"];
+    if (typeof xApiKey === "string" && xApiKey.length > 0) {
+      token = xApiKey;
+    }
+  }
+
+  if (!token) {
+    res.status(401).json({ error: { message: "Missing authentication. Provide 'Authorization: Bearer <key>' or 'x-api-key: <key>'", type: "invalid_request_error" } });
     return false;
   }
-  const token = auth.slice(7);
   if (token !== proxyKey) {
     res.status(401).json({ error: { message: "Invalid API key", type: "invalid_request_error" } });
     return false;
@@ -452,11 +463,13 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
                 choices: [{ index: 0, delta: {}, finish_reason: finishReason, logprobs: null }],
               };
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              res.write("data: [DONE]\n\n");
               res.flush?.();
+              // message_delta is the last meaningful event; break so we don't
+              // wait for the upstream connection to close on its own.
+              break;
             }
           }
-
-          res.write("data: [DONE]\n\n");
         } finally {
           clearInterval(keepalive);
           if (!res.writableEnded) res.end();
@@ -601,6 +614,9 @@ router.post("/messages", async (req: Request, res: Response) => {
             if (res.writableEnded) break;
             res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
             res.flush?.();
+            // message_stop is the final SSE event; break immediately so we
+            // don't wait for the upstream connection to close on its own.
+            if (event.type === "message_stop") break;
           }
         } finally {
           clearInterval(keepalive);
