@@ -248,6 +248,18 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
     return;
   }
 
+  const allSupportedModels = [...OPENAI_MODELS, ...ANTHROPIC_MODELS];
+  if (!isOpenAIModel(model) && !isAnthropicModel(model)) {
+    res.status(400).json({
+      error: {
+        message: `Model '${model}' is not supported. Supported models: ${allSupportedModels.join(", ")}`,
+        type: "invalid_request_error",
+        code: "model_not_found",
+      },
+    });
+    return;
+  }
+
   try {
     // ── OpenAI routing ──
     if (isOpenAIModel(model)) {
@@ -526,6 +538,17 @@ router.post("/messages", async (req: Request, res: Response) => {
 
   if (!model) {
     res.status(400).json({ error: { message: "model is required" } });
+    return;
+  }
+
+  const allSupportedModels2 = [...OPENAI_MODELS, ...ANTHROPIC_MODELS];
+  if (!isOpenAIModel(model) && !isAnthropicModel(model)) {
+    res.status(400).json({
+      error: {
+        type: "invalid_request_error",
+        message: `Model '${model}' is not supported. Supported models: ${allSupportedModels2.join(", ")}`,
+      },
+    });
     return;
   }
 
