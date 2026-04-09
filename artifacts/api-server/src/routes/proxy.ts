@@ -249,10 +249,11 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
     tool_choice?: OpenAI.Chat.ChatCompletionToolChoiceOption;
     max_tokens?: number;
     temperature?: number;
+    thinking?: { type: "enabled"; budget_tokens: number };
     [key: string]: unknown;
   };
 
-  const { model, messages, stream, tools, tool_choice, max_tokens, ...rest } = body;
+  const { model, messages, stream, tools, tool_choice, max_tokens, thinking, ...rest } = body;
 
   if (!model) {
     res.status(400).json({ error: { message: "model is required", type: "invalid_request_error" } });
@@ -339,6 +340,7 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         ...(system ? { system } : {}),
         ...(anthropicTools ? { tools: anthropicTools } : {}),
         ...(anthropicToolChoice ? { tool_choice: anthropicToolChoice } : {}),
+        ...(thinking ? { thinking } : {}),
       };
 
       // Forward anthropic-beta from client to upstream
