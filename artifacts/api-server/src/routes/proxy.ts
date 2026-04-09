@@ -285,11 +285,12 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
+        res.write("retry: 3000\n\n");
 
         const keepalive = setInterval(() => {
           res.write(": keepalive\n\n");
           res.flush?.();
-        }, 5000);
+        }, 3000);
 
         req.on("close", () => clearInterval(keepalive));
 
@@ -359,13 +360,14 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
+        res.write("retry: 3000\n\n");
 
         const keepalive = setInterval(() => {
           if (!res.writableEnded) {
             res.write(": keepalive\n\n");
             res.flush?.();
           }
-        }, 5000);
+        }, 3000);
 
         req.on("close", () => clearInterval(keepalive));
 
@@ -454,6 +456,24 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
                   res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                   res.flush?.();
                 }
+              } else if (event.delta.type === "thinking_delta") {
+                // Emit thinking content as reasoning_content (DeepSeek-compatible extension).
+                // Standard OpenAI clients ignore unknown delta fields; reasoning-aware
+                // clients (Open WebUI, etc.) will display it as a collapsible thought block.
+                const chunk = {
+                  id: messageId,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model,
+                  choices: [{
+                    index: 0,
+                    delta: { reasoning_content: event.delta.thinking },
+                    finish_reason: null,
+                    logprobs: null,
+                  }],
+                };
+                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                res.flush?.();
               }
             } else if (event.type === "message_delta") {
               const finishReason: OpenAI.Chat.ChatCompletionChunk.Choice["finish_reason"] =
@@ -599,13 +619,14 @@ router.post("/messages", async (req: Request, res: Response) => {
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
+        res.write("retry: 3000\n\n");
 
         const keepalive = setInterval(() => {
           if (!res.writableEnded) {
             res.write(": keepalive\n\n");
             res.flush?.();
           }
-        }, 5000);
+        }, 3000);
 
         req.on("close", () => clearInterval(keepalive));
 
@@ -726,13 +747,14 @@ router.post("/messages", async (req: Request, res: Response) => {
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
+        res.write("retry: 3000\n\n");
 
         const keepalive = setInterval(() => {
           if (!res.writableEnded) {
             res.write(": keepalive\n\n");
             res.flush?.();
           }
-        }, 5000);
+        }, 3000);
 
         req.on("close", () => clearInterval(keepalive));
 
