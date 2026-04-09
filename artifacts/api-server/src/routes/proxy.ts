@@ -463,13 +463,11 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
                 choices: [{ index: 0, delta: {}, finish_reason: finishReason, logprobs: null }],
               };
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-              res.write("data: [DONE]\n\n");
               res.flush?.();
-              // message_delta is the last meaningful event; break so we don't
-              // wait for the upstream connection to close on its own.
-              break;
             }
           }
+
+          res.write("data: [DONE]\n\n");
         } finally {
           clearInterval(keepalive);
           if (!res.writableEnded) res.end();
@@ -614,9 +612,6 @@ router.post("/messages", async (req: Request, res: Response) => {
             if (res.writableEnded) break;
             res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
             res.flush?.();
-            // message_stop is the final SSE event; break immediately so we
-            // don't wait for the upstream connection to close on its own.
-            if (event.type === "message_stop") break;
           }
         } finally {
           clearInterval(keepalive);
