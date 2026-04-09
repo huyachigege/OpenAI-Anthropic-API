@@ -285,14 +285,14 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
-        res.write("retry: 3000\n\n");
-
         const keepalive = setInterval(() => {
-          res.write(": keepalive\n\n");
-          res.flush?.();
-        }, 3000);
+          if (!res.writableEnded) {
+            res.write(": keepalive\n\n");
+            res.flush?.();
+          }
+        }, 20_000);
 
-        req.on("close", () => clearInterval(keepalive));
+        res.on("close", () => clearInterval(keepalive));
 
         try {
           const params: OpenAI.Chat.ChatCompletionCreateParamsStreaming = {
@@ -360,16 +360,15 @@ router.post("/chat/completions", async (req: Request, res: Response) => {
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
-        res.write("retry: 3000\n\n");
 
         const keepalive = setInterval(() => {
           if (!res.writableEnded) {
             res.write(": keepalive\n\n");
             res.flush?.();
           }
-        }, 3000);
+        }, 20_000);
 
-        req.on("close", () => clearInterval(keepalive));
+        res.on("close", () => clearInterval(keepalive));
 
         try {
           // Stream Anthropic and convert to OpenAI chunk format
@@ -579,7 +578,11 @@ router.post("/messages", async (req: Request, res: Response) => {
     model, messages, tools, tool_choice, max_tokens, stream,
     metadata, temperature, thinking, top_k, top_p, stop_sequences,
   } = body;
-  const system = normalizeSystem(body.system);
+
+  // For Anthropic native path: pass system as-is (preserves TextBlockParam[] with
+  // cache_control annotations needed for prompt caching / context-management beta).
+  // normalizeSystem is only used for the OpenAI-routing path below.
+  const anthropicSystem = body.system as Anthropic.MessageCreateParams["system"] | undefined;
 
   // Forward anthropic-beta header from client to upstream Anthropic
   const anthropicBeta = req.headers["anthropic-beta"] as string | undefined;
@@ -608,7 +611,7 @@ router.post("/messages", async (req: Request, res: Response) => {
         model,
         messages,
         max_tokens: max_tokens ?? 8192,
-        ...(system ? { system } : {}),
+        ...(anthropicSystem ? { system: anthropicSystem } : {}),
         ...(tools && tools.length > 0 ? { tools } : {}),
         ...(tool_choice ? { tool_choice } : {}),
         ...(metadata ? { metadata } : {}),
@@ -629,39 +632,58 @@ router.post("/messages", async (req: Request, res: Response) => {
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
+        res.socket?.setNoDelay(true);
         res.flushHeaders();
-        res.write("retry: 3000\n\n");
+
+        // AbortController lets us cancel the upstream Anthropic request when:
+        // (a) the client disconnects, or (b) we have already sent message_stop
+        // and need to unblock the for-await loop (Vertex AI keeps the upstream
+        // HTTP connection open after message_stop on tool_use responses).
+        const controller = new AbortController();
 
         const keepalive = setInterval(() => {
           if (!res.writableEnded) {
             res.write(": keepalive\n\n");
             res.flush?.();
           }
-        }, 3000);
+        }, 20_000);
 
-        req.on("close", () => clearInterval(keepalive));
+        // Use res.on("close") — NOT req.on("close").
+        // The Replit proxy half-closes the server-side request socket after
+        // forwarding the request body, which fires req.on("close") immediately
+        // and would prematurely abort the Anthropic stream.
+        // res.on("close") fires only when the response socket is destroyed
+        // (client actually dropped the connection), which is what we want.
+        res.on("close", () => {
+          clearInterval(keepalive);
+          controller.abort();
+        });
 
         try {
           const anthropicStream = anthropicClient.messages.stream(
             createParams as Anthropic.MessageStreamParams,
-            sdkOptions,
+            { ...sdkOptions, signal: controller.signal },
           );
           for await (const event of anthropicStream) {
             if (res.writableEnded) break;
             res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
             res.flush?.();
-            // After forwarding message_stop, immediately end the client response.
-            // The upstream SSE connection may remain open on the Replit proxy after
-            // message_stop (especially for tool_use responses), causing the for-await
-            // loop to block indefinitely. Ending here unblocks the client immediately.
-            if (event.type === "message_stop" && !res.writableEnded) {
+            // After message_stop: close the client connection immediately, then
+            // abort the upstream stream so the for-await loop exits cleanly.
+            // This fixes the "stuck in sending state" issue where Vertex AI keeps
+            // the upstream connection open (especially after tool_use responses).
+            if (event.type === "message_stop") {
               clearInterval(keepalive);
-              res.end();
-              // Do NOT break here — that would trigger abort() on the upstream HTTP
-              // controller which caused 5-min timeout issues. The writableEnded guard
-              // above will break on the next iteration when the upstream sends anything.
+              if (!res.writableEnded) res.end();
+              controller.abort(); // unblocks the for-await loop
+              break;
             }
           }
+        } catch (err: unknown) {
+          // If we intentionally aborted (after message_stop or client disconnect),
+          // suppress the error — it's expected and not a real failure.
+          if (controller.signal.aborted) return;
+          throw err;
         } finally {
           clearInterval(keepalive);
           if (!res.writableEnded) res.end();
@@ -680,11 +702,15 @@ router.post("/messages", async (req: Request, res: Response) => {
 
     // ── OpenAI model via Anthropic /v1/messages interface ──
     if (isOpenAIModel(model)) {
+      // For the OpenAI path, flatten system to a plain string (OpenAI doesn't
+      // support TextBlockParam arrays; cache_control is irrelevant here).
+      const systemText = normalizeSystem(body.system);
+
       // Convert Anthropic messages to OpenAI format
       const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
-      if (system) {
-        openaiMessages.push({ role: "system", content: typeof system === "string" ? system : String(system) });
+      if (systemText) {
+        openaiMessages.push({ role: "system", content: typeof systemText === "string" ? systemText : String(systemText) });
       }
 
       for (const msg of messages) {
@@ -769,16 +795,15 @@ router.post("/messages", async (req: Request, res: Response) => {
         res.setHeader("Connection", "keep-alive");
         res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
-        res.write("retry: 3000\n\n");
 
         const keepalive = setInterval(() => {
           if (!res.writableEnded) {
             res.write(": keepalive\n\n");
             res.flush?.();
           }
-        }, 3000);
+        }, 20_000);
 
-        req.on("close", () => clearInterval(keepalive));
+        res.on("close", () => clearInterval(keepalive));
 
         try {
           const oaiStream = await openaiClient.chat.completions.create({
