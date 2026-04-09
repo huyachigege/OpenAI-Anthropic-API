@@ -13,6 +13,10 @@ const openaiClient = new OpenAI({
 const anthropicClient = new Anthropic({
   baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? "dummy",
+  // Extended-thinking requests can run for well over 5 minutes.
+  // The Node.js server requestTimeout is already set to 0 (disabled);
+  // set the SDK-level timeout to 30 minutes to match.
+  timeout: 30 * 60 * 1000,
 });
 
 const OPENAI_MODELS = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "o4-mini", "o3"];
